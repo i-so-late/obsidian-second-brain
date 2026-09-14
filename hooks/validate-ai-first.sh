@@ -42,6 +42,9 @@
 #
 # Exit codes:
 #   0 = pass (silent), or warn via JSON on stdout (write is NOT reverted)
+#   1 = something could not be checked, said in one stderr line (non-blocking,
+#       the write stands): a payload with no file path (#171), or no working
+#       Python for the enabled checks 5-7 and no warning to carry that notice
 # =============================================================================
 
 # Warn via Claude Code hook JSON (systemMessage + additionalContext). stderr
@@ -245,10 +248,35 @@ WARNINGS=()
 # Checks 5, 6 and 7 are Python. The interpreter is resolved once, by running it:
 # `command -v python3` passes on the Windows Store stub, which runs nothing, so
 # the three checks were skipped without a word and a note carrying an em-dash or
-# an sk- key passed silently on every Windows install (#269).
-PYTHON=$(osb_python) || PYTHON=""
-if [[ -z "$PYTHON" ]]; then
-  printf 'AI-first hook: no working Python found (tried python3, python, py -3, uv run), so checks 5-7 (substitution characters, secrets, tag syntax) did NOT run on %s.\n' "$BASENAME" >&2
+# an sk- key passed silently on every Windows install (#269). It is resolved only
+# for the Python checks this vault has enabled: a vault that turned all three off
+# with AI_FIRST_SKIP_CHECKS pays for no probe and hears nothing about a missing
+# interpreter, and the notice names only the checks that were meant to run. The
+# notice itself is emitted at the end, where it can be made visible.
+PY_CHECKS=""
+PY_LABELS=""
+for py_check in 5 6 7; do
+  check_enabled "$py_check" || continue
+  case "$py_check" in
+    5) py_label="substitution characters" ;;
+    6) py_label="secrets" ;;
+    7) py_label="tag syntax" ;;
+  esac
+  PY_CHECKS="${PY_CHECKS:+$PY_CHECKS, }$py_check"
+  PY_LABELS="${PY_LABELS:+$PY_LABELS, }$py_label"
+done
+PYTHON=""
+PY_SKIPPED=""
+if [[ -n "$PY_CHECKS" ]]; then
+  PYTHON=$(osb_python) || PYTHON=""
+  if [[ -z "$PYTHON" ]]; then
+    case "$PY_CHECKS" in
+      "5, 6, 7") PY_NAMED="checks 5-7" ;;
+      *,*)       PY_NAMED="checks $PY_CHECKS" ;;
+      *)         PY_NAMED="check $PY_CHECKS" ;;
+    esac
+    PY_SKIPPED="AI-first hook: no working Python found (tried python3, python, py -3, uv run), so $PY_NAMED ($PY_LABELS) did NOT run on $BASENAME."
+  fi
 fi
 
 # A note saved with CRLF line endings (a Windows editor, git autocrlf) would fail
@@ -501,8 +529,20 @@ if [[ ${#WARNINGS[@]} -gt 0 ]]; then
   for w in "${WARNINGS[@]}"; do
     MSG+="  - ${w}"$'\n'
   done
+  # Checks that could not run are reported where the checks that did run are.
+  if [[ -n "$PY_SKIPPED" ]]; then MSG+="  - ${PY_SKIPPED}"$'\n'; fi
   MSG+=$'\n'"See references/ai-first-rules.md for the full spec."
   emit_ai_first_warning "$MSG"
+fi
+
+# Nothing to warn about, but Python checks that were meant to run did not. Claude
+# Code does not show the stderr of a hook that exits 0 (its hooks reference: the
+# debug log only, never the transcript), so saying it there was as silent as the
+# skip it reported. Exit 1, the non-blocking error #171 already uses above: the
+# write stands, and Claude Code reports this line as the hook's error.
+if [[ -n "$PY_SKIPPED" ]]; then
+  printf '%s\n' "$PY_SKIPPED" >&2
+  exit 1
 fi
 
 exit 0

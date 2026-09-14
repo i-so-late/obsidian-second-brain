@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **When the write-time hook cannot run its Python checks, the notice now reaches someone (follow-up to #269, by @i-so-late).** #280 made the hook say on stderr that checks 5-7 did not run when no interpreter was found, but the hook still exited 0, and Claude Code does not show the stderr of a hook that exits 0: its hooks reference sends it to the debug log only, and in a headless session on Windows with no Python reachable the notice survived only as the stderr field of a `hook_success` record. The skipped checks stayed as silent as before the fix. With nothing else to report, the hook now exits 1, the non-blocking error #171 already uses: the write stands, and the same session records a `hook_non_blocking_error` carrying the notice, which Claude Code reports as the hook's error. When there are warnings, the notice joins the warning the session and the user already see. The interpreter is resolved only for the Python checks a vault has enabled, so `AI_FIRST_SKIP_CHECKS=5,6,7` means no probe and no notice, and the notice names only the enabled checks. Three new tests in `tests/test_python_interpreter.py`, and the existing announce test now pins the exit code.
+
 ## [0.16.0] - 2026-09-15 - The Silent Failure
 
 ### Added

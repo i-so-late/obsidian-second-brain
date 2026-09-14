@@ -187,6 +187,79 @@ def test_the_validator_announces_the_checks_it_could_not_run(tmp_path):
     assert "leak.md" in r.stderr, "the message must name the file that went unchecked"
     # And the bash-only checks still pass this note, so nothing else changed.
     assert "secret material" not in r.stdout
+    # Claude Code sends the stderr of a hook that exits 0 to its debug log only. A
+    # non-zero exit is a non-blocking hook error, shown with the first stderr line.
+    assert r.returncode == 1, r.stderr
+    assert r.stdout == ""
+    assert r.stderr.splitlines()[0].startswith("AI-first hook: no working Python found"), r.stderr
+
+
+def _shadow_every_interpreter(tmp_path: Path, marker: Path | None = None) -> Path:
+    """Every candidate shadowed by something that exists and fails. With a marker,
+    each stub also records that it was run."""
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    record = f'echo ran >> "{marker.as_posix()}"\n' if marker else ""
+    for name in ("python3", "python", "py", "uv"):
+        stub = shadow / name
+        stub.write_text("#!/bin/sh\n" + record + "exit 9009\n", encoding="utf-8")
+        stub.chmod(0o755)
+    return shadow
+
+
+def _validate_with_path(vault: Path, note: Path, shadow: Path, **extra: str):
+    return subprocess.run(
+        [BASH, str(REPO_ROOT / "hooks/validate-ai-first.sh")],
+        input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(note)}}),
+        env=dict(os.environ, OBSIDIAN_VAULT_PATH=str(vault),
+                 PATH=f"{shadow}{os.pathsep}{os.environ['PATH']}", **extra),
+        capture_output=True, text=True,
+    )
+
+
+def test_checks_that_could_not_run_join_the_warnings_that_did(tmp_path):
+    """When the bash checks have something to report, the JSON warning is what the
+    session and the user see, so the notice goes there instead of to stderr."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "untyped.md"
+    note.write_text(FRONTMATTER.replace("type: note\n", "") + SECRET_LINE, encoding="utf-8")
+
+    r = _validate_with_path(vault, note, _shadow_every_interpreter(tmp_path))
+    assert r.returncode == 0, r.stderr
+    msg = json.loads(r.stdout)["systemMessage"]
+    assert "missing 'type:'" in msg
+    assert "checks 5-7 (substitution characters, secrets, tag syntax) did NOT run" in msg, msg
+
+
+def test_a_vault_that_turned_the_python_checks_off_is_neither_probed_nor_told(tmp_path):
+    """AI_FIRST_SKIP_CHECKS=5,6,7 says the vault does not want those checks. Probing
+    for an interpreter anyway would charge every write for it, and reporting that
+    the checks did not run would turn the opt-out into a hook error on every write."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "leak.md"
+    note.write_text(FRONTMATTER + SECRET_LINE, encoding="utf-8")
+    marker = tmp_path / "probed"
+
+    r = _validate_with_path(vault, note, _shadow_every_interpreter(tmp_path, marker),
+                            AI_FIRST_SKIP_CHECKS="5,6,7")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "" and "did NOT run" not in r.stderr, r.stderr
+    assert not marker.exists(), "an interpreter was probed for checks the vault turned off"
+
+
+def test_the_notice_names_only_the_python_checks_that_were_enabled(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "leak.md"
+    note.write_text(FRONTMATTER + SECRET_LINE, encoding="utf-8")
+
+    r = _validate_with_path(vault, note, _shadow_every_interpreter(tmp_path),
+                            AI_FIRST_SKIP_CHECKS="5,6")
+    assert r.returncode == 1, r.stderr
+    assert "check 7 (tag syntax) did NOT run" in r.stderr, r.stderr
+    assert "5-7" not in r.stderr
 
 
 def test_the_skill_installer_registers_the_wrapper():
