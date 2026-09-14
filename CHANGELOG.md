@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **The write-time hook's Python checks answer in UTF-8 whatever the Windows code page (follow-up to #269, by @i-so-late).** Check 7 prints the tags it rejects, and the hook hands that output to jq, which reads UTF-8. A native Windows Python writes a pipe in the ANSI code page instead, so on a Chinese Windows install (cp936) an invalid Chinese tag reached the session as mojibake, and an invalid tag with a character outside the code page, such as a Korean one, raised `UnicodeEncodeError`: check 7 printed nothing, the note passed, and the traceback went to stderr, which Claude Code does not show for a hook that exits 0. It became reachable once #269 let the Python checks run on Windows at all, and was found while verifying 0.16.0 there. All three Python checks now run with `PYTHONIOENCODING=utf-8`. Checks 5 and 6 print only ASCII today, so for them this is a guard rather than a fix. Tests in `tests/test_windows_compat.py` stand in for a non-UTF-8 code page with `PYTHONIOENCODING=ascii` on every platform, and use the real one on a Windows install whose code page is not UTF-8.
+
 ## [0.16.0] - 2026-09-15 - The Silent Failure
 
 ### Added

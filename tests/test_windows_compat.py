@@ -1,16 +1,18 @@
 """Windows compatibility fences (#240-#247, PRs #243 and #248 by @motkoning).
 
 The write-time hook's path normalization, the USERPROFILE-based config home,
-CRLF notes, the OBSIDIAN_ENV_FILE override, and the external-engine command
-split. The Windows-only cases skip off Windows; the portable ones run on the
-ubuntu CI runner too. Split out of test_smoke.py, which had grown past 1700
-lines, as a follow-up to the #243/#248 review.
+CRLF notes, the OBSIDIAN_ENV_FILE override, the external-engine command split,
+and the encoding the hook's Python checks answer in. The Windows-only cases skip
+off Windows; the portable ones run on the ubuntu CI runner too. Split out of
+test_smoke.py, which had grown past 1700 lines, as a follow-up to the #243/#248
+review.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -363,3 +365,66 @@ def test_retrieval_eval_external_cmd_splitting(tmp_path, os_name):
     )
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout.strip().splitlines()[-1]) == list(cases.values())
+
+
+# Resolved by path: on Windows a bare "bash" can resolve to WSL's launcher in System32.
+BASH = shutil.which("bash") or "bash"
+
+# Written as escapes so this file stays ASCII.
+TAG_ZH = "\u673a\u5668 \u5b66\u4e60"        # Chinese, with a space in it: an invalid tag
+TAG_KO = "\ud14c\uc2a4\ud2b8 \ud0dc\uadf8"  # Korean, same problem, and outside cp936
+
+
+def _validate_tagged_note(tmp_path: Path, tag: str, env: dict) -> subprocess.CompletedProcess:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "tagged.md"
+    note.write_text(
+        "---\ndate: 2026-09-15\ntype: note\ntags: [" + tag + "]\nai-first: true\n---\n\n"
+        "## For future agent\n\nAn English line \u2014 with an em-dash in it.\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        [BASH, str(REPO_ROOT / "hooks/validate-ai-first.sh")],
+        input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(note)}}),
+        env=dict(env, OBSIDIAN_VAULT_PATH=str(vault)),
+        capture_output=True, text=True, encoding="utf-8",
+    )
+
+
+def _env_without_python_encoding() -> dict:
+    return {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+
+
+@pytest.mark.parametrize("tag", [TAG_ZH, TAG_KO], ids=["chinese", "korean"])
+def test_python_check_findings_survive_a_non_utf8_code_page(tmp_path, tag):
+    """The Python checks print what they found, and the hook hands that to jq, which
+    reads UTF-8. A native Windows Python writes a pipe in the ANSI code page instead.
+    On a Chinese install (cp936) an invalid Chinese tag reached the session as
+    mojibake, and an invalid Korean tag raised UnicodeEncodeError, so check 7 printed
+    nothing and the note passed. PYTHONIOENCODING=ascii stands in for such a code
+    page on any platform."""
+    env = dict(_env_without_python_encoding(), PYTHONIOENCODING="ascii")
+    r = _validate_tagged_note(tmp_path, tag, env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip(), f"the hook reported nothing: {r.stderr[-500:]}"
+    msg = json.loads(r.stdout)["systemMessage"]
+    assert f"tag `{tag}` contains whitespace" in msg, msg
+    assert "U+2014" in msg, "check 5 must still run under the same code page"
+
+
+@pytest.mark.parametrize("tag", [TAG_ZH, TAG_KO], ids=["chinese", "korean"])
+def test_python_check_findings_survive_this_machines_code_page(tmp_path, tag):
+    """The same failure without the stand-in, where it was found: a Windows install
+    whose ANSI code page is not UTF-8."""
+    if os.name != "nt":
+        pytest.skip("the ANSI code page is a Windows setting")
+    # Asked of Windows, not of this interpreter: under Python's UTF-8 mode the
+    # locale reports utf-8 while the hook's own Python still uses the code page.
+    import ctypes
+    if ctypes.windll.kernel32.GetACP() == 65001:
+        pytest.skip("this Windows install already uses UTF-8 as its ANSI code page")
+    r = _validate_tagged_note(tmp_path, tag, _env_without_python_encoding())
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip(), f"the hook reported nothing: {r.stderr[-500:]}"
+    assert f"tag `{tag}` contains whitespace" in json.loads(r.stdout)["systemMessage"]

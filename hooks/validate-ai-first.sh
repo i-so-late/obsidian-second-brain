@@ -320,7 +320,13 @@ if check_enabled 5 && [[ -n "$PYTHON" ]]; then
   # own, and the mktemp path is a shell path (/tmp/...) that a native Windows
   # Python cannot open when the shell does not convert arguments, which would
   # have silently disabled these two checks.
-  NON_ASCII_HITS=$($PYTHON - "$FILE" <<'PYEOF'
+  #
+  # All three Python checks answer in UTF-8 (PYTHONIOENCODING), because their
+  # output ends up in jq, which reads nothing else. A native Windows Python writes
+  # a pipe in the ANSI code page (cp936, cp1252, ...): an invalid tag inside that
+  # code page reached the session as mojibake, and one outside it raised
+  # UnicodeEncodeError, so check 7 printed nothing and the note passed.
+  NON_ASCII_HITS=$(PYTHONIOENCODING=utf-8 $PYTHON - "$FILE" <<'PYEOF'
 import re
 import sys
 
@@ -391,7 +397,7 @@ fi
 # High-precision patterns only (a false positive here trains people to ignore
 # the hook). Catches real key material, not the word "password" in prose.
 if check_enabled 6 && [[ -n "$PYTHON" ]]; then
-  SECRET_HITS=$($PYTHON - "$FILE" <<'PYEOF'
+  SECRET_HITS=$(PYTHONIOENCODING=utf-8 $PYTHON - "$FILE" <<'PYEOF'
 import re
 import sys
 
@@ -433,8 +439,9 @@ fi
 # scripts/vault_health.py check_tag_syntax - keep the two in step.
 if check_enabled 7 && [[ -n "$PYTHON" ]]; then
   # The script arrives on stdin (python3 -), so the frontmatter goes in via the
-  # environment - piping it would be swallowed by the heredoc.
-  TAG_HITS=$(AI_FIRST_FRONTMATTER="$FRONTMATTER" $PYTHON - <<'PYEOF'
+  # environment - piping it would be swallowed by the heredoc. UTF-8 out, as
+  # for check 5: this is the check that prints the vault's own text back.
+  TAG_HITS=$(AI_FIRST_FRONTMATTER="$FRONTMATTER" PYTHONIOENCODING=utf-8 $PYTHON - <<'PYEOF'
 import os
 import re
 
